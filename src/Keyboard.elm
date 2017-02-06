@@ -1,7 +1,11 @@
-effect module Keyboard where { subscription = MySub } exposing
-  ( KeyCode
-  , presses, downs, ups
-  )
+effect module Keyboard
+    where { subscription = MySub }
+    exposing
+        ( KeyCode
+        , presses
+        , downs
+        , ups
+        )
 
 {-| This library lets you listen to global keyboard events.
 
@@ -20,7 +24,6 @@ import Process
 import Task exposing (Task)
 
 
-
 -- KEY CODES
 
 
@@ -30,12 +33,12 @@ and [`fromCode`](http://package.elm-lang.org/packages/elm-lang/core/latest/Char#
 to convert between key codes and characters.
 -}
 type alias KeyCode =
-  Int
+    Int
 
 
 keyCode : Json.Decoder KeyCode
 keyCode =
-  Json.field "keyCode" Json.int
+    Json.field "keyCode" Json.int
 
 
 
@@ -44,23 +47,23 @@ keyCode =
 
 {-| Subscribe to all key presses.
 -}
-presses : (KeyCode -> msg) -> Sub msg
+presses : (KeyCode -> Maybe msg) -> Sub msg
 presses tagger =
-  subscription (MySub "keypress" tagger)
+    subscription (MySub "keypress" tagger)
 
 
 {-| Subscribe to get codes whenever a key goes down.
 -}
-downs : (KeyCode -> msg) -> Sub msg
+downs : (KeyCode -> Maybe msg) -> Sub msg
 downs tagger =
-  subscription (MySub "keydown" tagger)
+    subscription (MySub "keydown" tagger)
 
 
 {-| Subscribe to get codes whenever a key goes up.
 -}
-ups : (KeyCode -> msg) -> Sub msg
+ups : (KeyCode -> Maybe msg) -> Sub msg
 ups tagger =
-  subscription (MySub "keyup" tagger)
+    subscription (MySub "keyup" tagger)
 
 
 
@@ -68,12 +71,12 @@ ups tagger =
 
 
 type MySub msg
-  = MySub String (KeyCode -> msg)
+    = MySub String (KeyCode -> Maybe msg)
 
 
 subMap : (a -> b) -> MySub a -> MySub b
 subMap func (MySub category tagger) =
-  MySub category (tagger >> func)
+    MySub category (tagger >> Maybe.map func)
 
 
 
@@ -81,13 +84,13 @@ subMap func (MySub category tagger) =
 
 
 type alias State msg =
-  Dict.Dict String (Watcher msg)
+    Dict.Dict String (Watcher msg)
 
 
 type alias Watcher msg =
-  { taggers : List (KeyCode -> msg)
-  , pid : Process.Id
-  }
+    { taggers : List (KeyCode -> Maybe msg)
+    , pid : Process.Id
+    }
 
 
 
@@ -95,33 +98,33 @@ type alias Watcher msg =
 
 
 type alias SubDict msg =
-  Dict.Dict String (List (KeyCode -> msg))
+    Dict.Dict String (List (KeyCode -> Maybe msg))
 
 
 categorize : List (MySub msg) -> SubDict msg
 categorize subs =
-  categorizeHelp subs Dict.empty
+    categorizeHelp subs Dict.empty
 
 
 categorizeHelp : List (MySub msg) -> SubDict msg -> SubDict msg
 categorizeHelp subs subDict =
-  case subs of
-    [] ->
-      subDict
+    case subs of
+        [] ->
+            subDict
 
-    MySub category tagger :: rest ->
-      categorizeHelp rest <|
-        Dict.update category (categorizeHelpHelp tagger) subDict
+        (MySub category tagger) :: rest ->
+            categorizeHelp rest <|
+                Dict.update category (categorizeHelpHelp tagger) subDict
 
 
 categorizeHelpHelp : a -> Maybe (List a) -> Maybe (List a)
 categorizeHelpHelp value maybeValues =
-  case maybeValues of
-    Nothing ->
-      Just [value]
+    case maybeValues of
+        Nothing ->
+            Just [ value ]
 
-    Just values ->
-      Just (value :: values)
+        Just values ->
+            Just (value :: values)
 
 
 
@@ -130,53 +133,60 @@ categorizeHelpHelp value maybeValues =
 
 init : Task Never (State msg)
 init =
-  Task.succeed Dict.empty
+    Task.succeed Dict.empty
 
 
 type alias Msg =
-  { category : String
-  , keyCode : KeyCode
-  }
+    { category : String
+    , keyCode : KeyCode
+    }
 
 
 (&>) task1 task2 =
-  Task.andThen (\_ -> task2) task1
+    Task.andThen (\_ -> task2) task1
 
 
 onEffects : Platform.Router msg Msg -> List (MySub msg) -> State msg -> Task Never (State msg)
 onEffects router newSubs oldState =
-  let
-    leftStep category {pid} task =
-      Process.kill pid &> task
+    let
+        leftStep category { pid } task =
+            Process.kill pid &> task
 
-    bothStep category {pid} taggers task =
-      Task.map (Dict.insert category (Watcher taggers pid)) task
+        bothStep category { pid } taggers task =
+            Task.map (Dict.insert category (Watcher taggers pid)) task
 
-    rightStep category taggers task =
-      task
-        |> Task.andThen (\state -> Process.spawn (Dom.onDocument category keyCode (Platform.sendToSelf router << Msg category))
-        |> Task.andThen (\pid -> Task.succeed (Dict.insert category (Watcher taggers pid) state)))
-  in
-    Dict.merge
-      leftStep
-      bothStep
-      rightStep
-      oldState
-      (categorize newSubs)
-      (Task.succeed Dict.empty)
+        rightStep category taggers task =
+            task
+                |> Task.andThen
+                    (\state ->
+                        Process.spawn (Dom.onDocument category keyCode (Platform.sendToSelf router << Msg category))
+                            |> Task.andThen (\pid -> Task.succeed (Dict.insert category (Watcher taggers pid) state))
+                    )
+    in
+        Dict.merge
+            leftStep
+            bothStep
+            rightStep
+            oldState
+            (categorize newSubs)
+            (Task.succeed Dict.empty)
 
 
 onSelfMsg : Platform.Router msg Msg -> Msg -> State msg -> Task Never (State msg)
-onSelfMsg router {category,keyCode} state =
-  case Dict.get category state of
-    Nothing ->
-      Task.succeed state
+onSelfMsg router { category, keyCode } state =
+    case Dict.get category state of
+        Nothing ->
+            Task.succeed state
 
-    Just {taggers} ->
-      let
-        send tagger =
-          Platform.sendToApp router (tagger keyCode)
-      in
-        Task.sequence (List.map send taggers)
-          |> Task.andThen (\_ -> Task.succeed state)
+        Just { taggers } ->
+            let
+                send tagger =
+                    case tagger keyCode of
+                        Just m ->
+                            Platform.sendToApp router m
 
+                        Nothing ->
+                            Task.succeed ()
+            in
+                Task.sequence (List.map send taggers)
+                    |> Task.andThen (\_ -> Task.succeed state)
